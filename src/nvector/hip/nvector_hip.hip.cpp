@@ -35,6 +35,65 @@ using namespace sundials;
 using namespace sundials::hip;
 using namespace sundials::hip::impl;
 
+#include <thrust/reduce.h>
+#include <thrust/extrema.h>
+#include <thrust/transform.h>
+#include <thrust/functional.h>
+#include <thrust/execution_policy.h>
+#include <thrust/inner_product.h>
+
+#ifndef USE_THRUST
+#define USE_THRUST
+#endif
+//#undef USE_THRUST
+struct multTupleComponents : public thrust::unary_function<thrust::tuple<sunrealtype, sunrealtype> ,sunrealtype>
+{
+  __host__ __device__
+  sunrealtype operator()(thrust::tuple<sunrealtype, sunrealtype> x) const
+  {
+    return thrust::get<0>(x)*thrust::get<1>(x);
+  }
+};
+
+static sunrealtype thrustWL2NormSquareKernel(sunrealtype * X, sunrealtype * W, sunindextype N)
+{
+  multTupleComponents mult;
+  typedef thrust::tuple<sunrealtype*, sunrealtype*> IterTuple;
+  typedef thrust::zip_iterator<IterTuple> zipIter;
+  return thrust::reduce(thrust::device,
+			thrust::make_transform_iterator(thrust::make_transform_iterator<multTupleComponents, zipIter>(thrust::make_tuple(X,W),mult), thrust::square<sunrealtype>()),
+			thrust::make_transform_iterator(thrust::make_transform_iterator<multTupleComponents, zipIter>(thrust::make_tuple(X+N,W+N),mult), thrust::square<sunrealtype>()));
+}
+
+static sunrealtype thrustDotProdKernel(sunrealtype * X, sunrealtype * W, sunindextype N)
+{
+  return thrust::inner_product(thrust::device, X, X+N, W, 0.);
+}
+
+static sunrealtype thrustFindMinKernel(sunrealtype * X, sunindextype N)
+{
+  sunrealtype * xmin = thrust::min_element(thrust::device, X, X + N);
+  sunrealtype xm;
+  hipMemcpy(&xm, xmin, sizeof(sunrealtype), hipMemcpyDeviceToHost);
+  return xm;
+}
+
+struct maxabs : public thrust::binary_function<sunrealtype, sunrealtype, sunrealtype>
+{
+  __host__ __device__ sunrealtype operator()(const sunrealtype &x, const sunrealtype &y) const
+  {
+    sunrealtype ax = (x < sunrealtype(0) ? -x : x);
+    sunrealtype ay = (y < sunrealtype(0) ? -y : y);
+    return (ax>ay ? ax : ay);
+  }
+};
+
+static sunrealtype thrustMaxNormKernel(sunrealtype * X, sunindextype N)
+{
+  maxabs op;
+  return thrust::reduce(thrust::device, X, X+N, sunrealtype(0), op);
+}
+
 /*
  * Private function definitions
  */
@@ -892,18 +951,26 @@ sunrealtype N_VDotProd_Hip(N_Vector X, N_Vector Y)
   }
   else
   {
+#ifdef USE_THRUST
+    gpu_result = thrustDotProdKernel(NVEC_HIP_DDATAp(X),
+				     NVEC_HIP_DDATAp(Y),
+				     NVEC_HIP_CONTENT(X)->length);
+
+#else
     dotProdKernel<sunrealtype, sunindextype, GridReducerLDS>
       <<<grid, block, shMemSize, stream>>>(NVEC_HIP_DDATAp(X), NVEC_HIP_DDATAp(Y),
                                            NVEC_HIP_DBUFFERp(X),
                                            NVEC_HIP_CONTENT(X)->length,
                                            NVEC_HIP_DCOUNTERp(X));
+#endif
   }
+#ifndef USE_THRUST
   PostKernelLaunch();
 
   // Get result from the GPU
   CopyReductionBufferFromDevice(X);
   gpu_result = NVEC_HIP_HBUFFERp(X)[0];
-
+#endif
   return gpu_result;
 }
 
@@ -938,19 +1005,24 @@ sunrealtype N_VMaxNorm_Hip(N_Vector X)
   }
   else
   {
+#ifdef USE_THRUST
+    gpu_result = thrustMaxNormKernel(NVEC_HIP_DDATAp(X), NVEC_HIP_CONTENT(X)->length);
+#else
     maxNormKernel<sunrealtype, sunindextype, GridReducerLDS>
       <<<grid, block, shMemSize, stream>>>(NVEC_HIP_DDATAp(X),
                                            NVEC_HIP_DBUFFERp(X),
                                            NVEC_HIP_CONTENT(X)->length,
                                            NVEC_HIP_DCOUNTERp(X));
-  }
 
+#endif
+  }
+#ifndef USE_THRUST
   PostKernelLaunch();
 
   // Finish reduction on CPU if there are less than two blocks of data left.
   CopyReductionBufferFromDevice(X);
   gpu_result = NVEC_HIP_HBUFFERp(X)[0];
-
+#endif
   return gpu_result;
 }
 
@@ -968,6 +1040,7 @@ sunrealtype N_VWSqrSumLocal_Hip(N_Vector X, N_Vector W)
       "ERROR in N_VWSqrSumLocal_Hip: GetKernelParameters returned nonzero\n");
   }
 
+  //printf("grid=%ld, block%ld, shMemSize=%ld\n", grid, block, shMemSize);
   const size_t buffer_size = atomic ? 1 : grid;
   if (InitializeReductionBuffer(X, gpu_result, buffer_size))
   {
@@ -975,6 +1048,29 @@ sunrealtype N_VWSqrSumLocal_Hip(N_Vector X, N_Vector W)
                          "InitializeReductionBuffer returned nonzero\n");
   }
 
+#if 0
+  FILE * fidx = fopen("x.txt","wt");
+  FILE * fidw = fopen("w.txt","wt");
+
+  size_t N = NVEC_HIP_CONTENT(X)->length*sizeof(realtype);
+  realtype * xh = (realtype*)malloc(N);
+  realtype * wh = (realtype*)malloc(N);
+  hipMemcpy(xh, NVEC_HIP_DDATAp(X), N, hipMemcpyDeviceToHost); 
+  hipMemcpy(wh, NVEC_HIP_DDATAp(W), N, hipMemcpyDeviceToHost); 
+
+  for (int i=0; i<NVEC_HIP_CONTENT(X)->length; ++i)
+    {
+      fprintf(fidx, "%1.16f\n", xh[i]);
+      fprintf(fidw, "%1.16f\n", wh[i]);
+    }
+  
+  free(xh);
+  free(wh);
+  fclose(fidx);
+  fclose(fidw);
+  exit(0);
+#endif
+  
   if (atomic)
   {
     wL2NormSquareKernel<sunrealtype, sunindextype, GridReducerAtomic>
@@ -984,19 +1080,25 @@ sunrealtype N_VWSqrSumLocal_Hip(N_Vector X, N_Vector W)
   }
   else
   {
+#ifdef USE_THRUST
+    gpu_result = thrustWL2NormSquareKernel(NVEC_HIP_DDATAp(X),
+					   NVEC_HIP_DDATAp(W),
+					   NVEC_HIP_CONTENT(X)->length);
+#else
     wL2NormSquareKernel<sunrealtype, sunindextype, GridReducerLDS>
       <<<grid, block, shMemSize, stream>>>(NVEC_HIP_DDATAp(X), NVEC_HIP_DDATAp(W),
                                            NVEC_HIP_DBUFFERp(X),
                                            NVEC_HIP_CONTENT(X)->length,
                                            NVEC_HIP_DCOUNTERp(X));
+#endif
   }
-
+#ifndef USE_THRUST
   PostKernelLaunch();
-
   // Get result from the GPU
+
   CopyReductionBufferFromDevice(X);
   gpu_result = NVEC_HIP_HBUFFERp(X)[0];
-
+#endif
   return gpu_result;
 }
 
@@ -1090,19 +1192,23 @@ sunrealtype N_VMin_Hip(N_Vector X)
   }
   else
   {
+#ifdef USE_THRUST
+    gpu_result = thrustFindMinKernel(NVEC_HIP_DDATAp(X), NVEC_HIP_CONTENT(X)->length);
+#else
     findMinKernel<sunrealtype, sunindextype, GridReducerLDS>
       <<<grid, block, shMemSize, stream>>>(gpu_result, NVEC_HIP_DDATAp(X),
                                            NVEC_HIP_DBUFFERp(X),
                                            NVEC_HIP_CONTENT(X)->length,
                                            NVEC_HIP_DCOUNTERp(X));
+#endif
   }
-
+#ifndef USE_THRUST
   PostKernelLaunch();
 
   // Get result from the GPU
   CopyReductionBufferFromDevice(X);
   gpu_result = NVEC_HIP_HBUFFERp(X)[0];
-
+#endif
   return gpu_result;
 }
 
@@ -2560,3 +2666,4 @@ static void PostKernelLaunch()
   SUNDIALS_HIP_VERIFY(hipGetLastError());
 #endif
 }
+
