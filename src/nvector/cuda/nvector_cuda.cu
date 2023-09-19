@@ -18,6 +18,7 @@
  * of the NVECTOR package.
  * -----------------------------------------------------------------*/
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -38,8 +39,15 @@
 #define HALF SUN_RCONST(0.5)
 
 using namespace sundials;
-using namespace sundials::cuda;
-using namespace sundials::cuda::impl;
+using namespace sundials::cuda_sundials;
+using namespace sundials::cuda_sundials::impl;
+
+#include <thrust/inner_product.h>
+#include <thrust/reduce.h>
+#include <thrust/extrema.h>
+#include <thrust/transform.h>
+#include <thrust/functional.h>
+#include <thrust/execution_policy.h>
 
 /*
  * Private function definitions
@@ -98,6 +106,12 @@ static void PostKernelLaunch();
   ((sunrealtype*)NVEC_CUDA_PRIVATE(x)->reduce_buffer_dev->ptr)
 #define NVEC_CUDA_DCOUNTERp(x) \
   ((unsigned int*)NVEC_CUDA_PRIVATE(x)->device_counter->ptr)
+
+static cudaStream_t NVectorCudaReduceStream(N_Vector v)
+{
+  return *(NVEC_CUDA_CONTENT(v)->reduce_exec_policy->stream());
+}
+
 
 /*
  * Private structure definition
@@ -891,8 +905,25 @@ void N_VAddConst_Cuda(N_Vector X, sunrealtype b, N_Vector Z)
   PostKernelLaunch();
 }
 
+static sunrealtype thrustDotProdKernelCuda(sunrealtype* X, sunrealtype* W,
+                                           sunindextype N, cudaStream_t stream)
+{
+  return thrust::inner_product(thrust::cuda::par.on(stream), X, X + N, W, ZERO);
+}
+
 sunrealtype N_VDotProd_Cuda(N_Vector X, N_Vector Y)
 {
+  if (NVEC_CUDA_CONTENT(X)->reduce_exec_policy->usesThrust())
+  {
+    const sunindextype N = NVEC_CUDA_CONTENT(X)->length;
+    if (N > 0)
+    {
+      cudaStream_t rstream = NVectorCudaReduceStream(X);
+      return thrustDotProdKernelCuda(NVEC_CUDA_DDATAp(X), NVEC_CUDA_DDATAp(Y), N,
+                                     rstream);
+    }
+  }
+
   bool atomic;
   size_t grid, block, shMemSize;
   cudaStream_t stream;
@@ -939,8 +970,36 @@ sunrealtype N_VDotProd_Cuda(N_Vector X, N_Vector Y)
   return gpu_result;
 }
 
+struct maxabsCuda
+{
+  __host__ __device__ sunrealtype operator()(const sunrealtype& x,
+                                             const sunrealtype& y) const
+  {
+    sunrealtype ax = (x < sunrealtype(0) ? -x : x);
+    sunrealtype ay = (y < sunrealtype(0) ? -y : y);
+    return (ax > ay ? ax : ay);
+  }
+};
+
+static sunrealtype thrustMaxNormKernelCuda(sunrealtype* X, sunindextype N,
+                                           cudaStream_t stream)
+{
+  maxabsCuda op;
+  return thrust::reduce(thrust::cuda::par.on(stream), X, X + N, sunrealtype(0), op);
+}
+
 sunrealtype N_VMaxNorm_Cuda(N_Vector X)
 {
+  if (NVEC_CUDA_CONTENT(X)->reduce_exec_policy->usesThrust())
+  {
+    const sunindextype N = NVEC_CUDA_CONTENT(X)->length;
+    if (N > 0)
+    {
+      cudaStream_t rstream = NVectorCudaReduceStream(X);
+      return thrustMaxNormKernelCuda(NVEC_CUDA_DDATAp(X), N, rstream);
+    }
+  }
+
   bool atomic;
   size_t grid, block, shMemSize;
   cudaStream_t stream;
@@ -986,8 +1045,47 @@ sunrealtype N_VMaxNorm_Cuda(N_Vector X)
   return gpu_result;
 }
 
+struct multTupleComponentsCuda
+{
+  __host__ __device__ sunrealtype
+  operator()(thrust::tuple<sunrealtype, sunrealtype> x) const
+  {
+    return thrust::get<0>(x) * thrust::get<1>(x);
+  }
+};
+
+static sunrealtype thrustWL2NormSquareKernelCuda(sunrealtype* X, sunrealtype* W,
+                                                 sunindextype N,
+                                                 cudaStream_t stream)
+{
+  multTupleComponentsCuda mult;
+  typedef thrust::tuple<sunrealtype*, sunrealtype*> IterTuple;
+  typedef thrust::zip_iterator<IterTuple> zipIter;
+  return thrust::reduce(
+    thrust::cuda::par.on(stream),
+    thrust::make_transform_iterator(
+      thrust::make_transform_iterator<multTupleComponentsCuda, zipIter>(
+        thrust::make_tuple(X, W), mult),
+      thrust::square<sunrealtype>()),
+    thrust::make_transform_iterator(
+      thrust::make_transform_iterator<multTupleComponentsCuda, zipIter>(
+        thrust::make_tuple(X + N, W + N), mult),
+      thrust::square<sunrealtype>()));
+}
+
 sunrealtype N_VWSqrSumLocal_Cuda(N_Vector X, N_Vector W)
 {
+  if (NVEC_CUDA_CONTENT(X)->reduce_exec_policy->usesThrust())
+  {
+    const sunindextype N = NVEC_CUDA_CONTENT(X)->length;
+    if (N > 0)
+    {
+      cudaStream_t rstream = NVectorCudaReduceStream(X);
+      return thrustWL2NormSquareKernelCuda(NVEC_CUDA_DDATAp(X),
+                                             NVEC_CUDA_DDATAp(W), N, rstream);
+    }
+  }
+
   bool atomic;
   size_t grid, block, shMemSize;
   cudaStream_t stream;
@@ -1039,6 +1137,7 @@ sunrealtype N_VWrmsNorm_Cuda(N_Vector X, N_Vector W)
   const sunrealtype sum = N_VWSqrSumLocal_Cuda(X, W);
   return std::sqrt(sum / NVEC_CUDA_CONTENT(X)->length);
 }
+
 
 sunrealtype N_VWSqrSumMaskLocal_Cuda(N_Vector X, N_Vector W, N_Vector Id)
 {
@@ -1096,8 +1195,29 @@ sunrealtype N_VWrmsNormMask_Cuda(N_Vector X, N_Vector W, N_Vector Id)
   return std::sqrt(sum / NVEC_CUDA_CONTENT(X)->length);
 }
 
+static sunrealtype thrustFindMinKernelCuda(sunrealtype* X, sunindextype N,
+                                           cudaStream_t stream)
+{
+  sunrealtype* xmin = thrust::min_element(thrust::cuda::par.on(stream), X, X + N);
+  sunrealtype xm;
+  SUNDIALS_CUDA_VERIFY(cudaStreamSynchronize(stream));
+  SUNDIALS_CUDA_VERIFY(cudaMemcpy(&xm, xmin, sizeof(sunrealtype),
+                                  cudaMemcpyDeviceToHost));
+  return xm;
+}
+
 sunrealtype N_VMin_Cuda(N_Vector X)
 {
+  if (NVEC_CUDA_CONTENT(X)->reduce_exec_policy->usesThrust())
+  {
+    const sunindextype N = NVEC_CUDA_CONTENT(X)->length;
+    if (N > 0)
+    {
+      cudaStream_t rstream = NVectorCudaReduceStream(X);
+      return thrustFindMinKernelCuda(NVEC_CUDA_DDATAp(X), N, rstream);
+    }
+  }
+
   bool atomic;
   size_t grid, block, shMemSize;
   cudaStream_t stream;
@@ -2685,7 +2805,7 @@ static int GetKernelParameters(N_Vector v, sunbooleantype reduction,
       }
     }
 
-    if (block % sundials::cuda::WARP_SIZE)
+    if (block % sundials::cuda_sundials::WARP_SIZE)
     {
 #ifdef SUNDIALS_DEBUG
       throw std::runtime_error(

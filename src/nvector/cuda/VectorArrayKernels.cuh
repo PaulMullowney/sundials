@@ -26,7 +26,7 @@
 #include "sundials_cuda_kernels.cuh"
 
 namespace sundials {
-namespace cuda {
+namespace cuda_sundials {
 namespace impl {
 
 /*
@@ -200,7 +200,7 @@ __global__ void linearCombinationVectorArrayKernel(int nv, int ns, T* c, T** xd,
 }
 
 } // namespace impl
-} // namespace cuda
+} // namespace cuda_sundials
 } // namespace sundials
 
 #endif // _NVECTOR_CUDA_ARRAY_KERNELS_CUH_

@@ -26,7 +26,7 @@
 
 namespace sundials {
 namespace sunmatrix_gpudense {
-namespace cuda {
+namespace cuda_sundials {
 
 template<typename T, typename I, typename Lambda>
 __device__ __forceinline__ void block_col_row(I nblocks, I m, I n, Lambda&& fn)
@@ -92,7 +92,7 @@ __global__ void scaleAddKernel(I m, I n, I nblocks, T c, T* A, const T* B)
                       { A[kij] = c * A[kij] + B[kij]; });
 }
 
-} // namespace cuda
+} // namespace cuda_sundials
 } // namespace sunmatrix_gpudense
 } // namespace sundials
 

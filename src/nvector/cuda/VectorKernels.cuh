@@ -26,7 +26,7 @@
 #include "sundials_cuda_kernels.cuh"
 
 namespace sundials {
-namespace cuda {
+namespace cuda_sundials {
 namespace impl {
 
 /*
@@ -295,7 +295,7 @@ __global__ void minQuotientKernel(const T MAX_VAL, const T* num, const T* den,
 }
 
 } // namespace impl
-} // namespace cuda
+} // namespace cuda_sundials
 } // namespace sundials
 
 #endif // _NVECTOR_CUDA_KERNELS_CUH_

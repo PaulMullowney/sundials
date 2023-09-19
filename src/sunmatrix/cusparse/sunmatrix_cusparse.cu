@@ -33,7 +33,7 @@
 #include "sundials_debug.h"
 
 /* Use the namespace for the kernels */
-using namespace sundials::cuda;
+using namespace sundials::cuda_sundials;
 using namespace sundials::sunmatrix_cusparse;
 
 /* Constants */

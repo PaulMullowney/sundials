@@ -31,7 +31,7 @@
 #include "sundials_cuda.h"
 
 namespace sundials {
-namespace cuda {
+namespace cuda_sundials {
 namespace impl {
 
 template<typename T>
@@ -445,7 +445,7 @@ struct GridReducerAtomic
 };
 
 } // namespace impl
-} // namespace cuda
+} // namespace cuda_sundials
 } // namespace sundials
 
 #endif // _SUNDIALS_CUDA_KERNELS_CUH

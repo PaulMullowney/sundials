@@ -28,7 +28,7 @@
 #include <sundials/sundials_types.h>
 
 namespace sundials {
-namespace cuda {
+namespace cuda_sundials {
 
 constexpr const sunindextype WARP_SIZE      = 32;
 constexpr const sunindextype MAX_BLOCK_SIZE = 1024;
@@ -54,6 +54,9 @@ public:
   }
 
   virtual bool atomic() const { return false; }
+
+  /* When true, parallel reductions use Thrust on the policy stream. */
+  virtual bool usesThrust() const { return false; }
 
   virtual ~ExecPolicy() {}
 
@@ -234,13 +237,43 @@ private:
   const size_t gridDim_;
 };
 
-} // namespace cuda
+class ThrustExecPolicy : public ExecPolicy
+{
+public:
+  explicit ThrustExecPolicy(cudaStream_t stream = 0) : ExecPolicy(stream) {}
+
+  ThrustExecPolicy(const ThrustExecPolicy& ex) : ExecPolicy(ex.stream_) {}
+
+  virtual size_t gridSize(size_t /*numWorkUnits*/ = 0,
+                          size_t /*blockDim*/     = 0) const
+  {
+    return 1;
+  }
+
+  virtual size_t blockSize(size_t /*numWorkUnits*/ = 0,
+                           size_t /*gridDim*/      = 0) const
+  {
+    return 256;
+  }
+
+  virtual ExecPolicy* clone() const
+  {
+    return static_cast<ExecPolicy*>(new ThrustExecPolicy(*this));
+  }
+
+  virtual bool usesThrust() const { return true; }
+
+private:
+};
+
+} // namespace cuda_sundials
 } // namespace sundials
 
-typedef sundials::cuda::ExecPolicy SUNCudaExecPolicy;
-typedef sundials::cuda::ThreadDirectExecPolicy SUNCudaThreadDirectExecPolicy;
-typedef sundials::cuda::GridStrideExecPolicy SUNCudaGridStrideExecPolicy;
-typedef sundials::cuda::BlockReduceExecPolicy SUNCudaBlockReduceExecPolicy;
-typedef sundials::cuda::BlockReduceAtomicExecPolicy SUNCudaBlockReduceAtomicExecPolicy;
+typedef sundials::cuda_sundials::ExecPolicy SUNCudaExecPolicy;
+typedef sundials::cuda_sundials::ThreadDirectExecPolicy SUNCudaThreadDirectExecPolicy;
+typedef sundials::cuda_sundials::GridStrideExecPolicy SUNCudaGridStrideExecPolicy;
+typedef sundials::cuda_sundials::BlockReduceExecPolicy SUNCudaBlockReduceExecPolicy;
+typedef sundials::cuda_sundials::BlockReduceAtomicExecPolicy SUNCudaBlockReduceAtomicExecPolicy;
+typedef sundials::cuda_sundials::ThrustExecPolicy SUNCudaThrustExecPolicy;
 
 #endif
