@@ -46,52 +46,52 @@ using namespace sundials::hip::impl;
 #define USE_THRUST
 #endif
 //#undef USE_THRUST
-struct multTupleComponents : public thrust::unary_function<thrust::tuple<realtype, realtype> ,realtype>
+struct multTupleComponents : public thrust::unary_function<thrust::tuple<sunrealtype, sunrealtype> ,sunrealtype>
 {
   __host__ __device__
-  realtype operator()(thrust::tuple<realtype, realtype> x) const
+  sunrealtype operator()(thrust::tuple<sunrealtype, sunrealtype> x) const
   {
     return thrust::get<0>(x)*thrust::get<1>(x);
   }
 };
 
-static realtype thrustWL2NormSquareKernel(realtype * X, realtype * W, sunindextype N)
+static sunrealtype thrustWL2NormSquareKernel(sunrealtype * X, sunrealtype * W, sunindextype N)
 {
   multTupleComponents mult;
-  typedef thrust::tuple<realtype*, realtype*> IterTuple;
+  typedef thrust::tuple<sunrealtype*, sunrealtype*> IterTuple;
   typedef thrust::zip_iterator<IterTuple> zipIter;
   return thrust::reduce(thrust::device,
-			thrust::make_transform_iterator(thrust::make_transform_iterator<multTupleComponents, zipIter>(thrust::make_tuple(X,W),mult), thrust::square<realtype>()),
-			thrust::make_transform_iterator(thrust::make_transform_iterator<multTupleComponents, zipIter>(thrust::make_tuple(X+N,W+N),mult), thrust::square<realtype>()));
+			thrust::make_transform_iterator(thrust::make_transform_iterator<multTupleComponents, zipIter>(thrust::make_tuple(X,W),mult), thrust::square<sunrealtype>()),
+			thrust::make_transform_iterator(thrust::make_transform_iterator<multTupleComponents, zipIter>(thrust::make_tuple(X+N,W+N),mult), thrust::square<sunrealtype>()));
 }
 
-static realtype thrustDotProdKernel(realtype * X, realtype * W, sunindextype N)
+static sunrealtype thrustDotProdKernel(sunrealtype * X, sunrealtype * W, sunindextype N)
 {
   return thrust::inner_product(thrust::device, X, X+N, W, 0.);
 }
 
-static realtype thrustFindMinKernel(realtype * X, sunindextype N)
+static sunrealtype thrustFindMinKernel(sunrealtype * X, sunindextype N)
 {
-  realtype * xmin = thrust::min_element(thrust::device, X, X + N);
-  realtype xm;
-  hipMemcpy(&xm, xmin, sizeof(realtype), hipMemcpyDeviceToHost);
+  sunrealtype * xmin = thrust::min_element(thrust::device, X, X + N);
+  sunrealtype xm;
+  hipMemcpy(&xm, xmin, sizeof(sunrealtype), hipMemcpyDeviceToHost);
   return xm;
 }
 
-struct maxabs : public thrust::binary_function<realtype, realtype, realtype>
+struct maxabs : public thrust::binary_function<sunrealtype, sunrealtype, sunrealtype>
 {
-  __host__ __device__ realtype operator()(const realtype &x, const realtype &y) const
+  __host__ __device__ sunrealtype operator()(const sunrealtype &x, const sunrealtype &y) const
   {
-    realtype ax = (x < realtype(0) ? -x : x);
-    realtype ay = (y < realtype(0) ? -y : y);
+    sunrealtype ax = (x < sunrealtype(0) ? -x : x);
+    sunrealtype ay = (y < sunrealtype(0) ? -y : y);
     return (ax>ay ? ax : ay);
   }
 };
 
-static realtype thrustMaxNormKernel(realtype * X, sunindextype N)
+static sunrealtype thrustMaxNormKernel(sunrealtype * X, sunindextype N)
 {
   maxabs op;
-  return thrust::reduce(thrust::device, X, X+N, realtype(0), op);
+  return thrust::reduce(thrust::device, X, X+N, sunrealtype(0), op);
 }
 
 /*
